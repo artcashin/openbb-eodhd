@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Smoke-test every openbb-eodhd command against EODHD's PUBLIC demo token.
 
-The `demo` token is public and rate-limited; it only serves a few symbols
-(AAPL.US, BTC-USD.CC, EURUSD.FOREX), which is exactly enough to exercise all
-nine registered commands. NO private API key is used or required.
+The `demo` token is public and serves — with NO limits, all data types — exactly
+these symbols: AAPL.US, TSLA.US, VTI.US, AMZN.US, BTC-USD.CC, EURUSD.FOREX. That
+covers equity, ETF, crypto and forex bars, a multi-symbol request, and the
+fundamentals/corporate-action commands. NO private API key is used or required.
 
     python smoke.py            # uses the public 'demo' token
     EODHD_API_KEY=xxx python smoke.py   # or your own token (optional)
@@ -40,7 +41,15 @@ def main() -> int:
         lambda: obb.equity.price.historical("AAPL", interval="1d",
                 start_date="2024-02-12", end_date="2024-02-16", **P))
     run("equity.price.historical (5m)",
-        lambda: obb.equity.price.historical("AAPL", interval="5m", **P))
+        lambda: obb.equity.price.historical("TSLA", interval="5m", **P))
+    run("equity.price.historical (multi)",
+        lambda: obb.equity.price.historical("AAPL,TSLA,AMZN", interval="1d",
+                start_date="2024-02-12", end_date="2024-02-16", **P))
+    # EODHD serves ETFs through the same equity /eod endpoint (no separate ETF
+    # fetcher), so VTI is queried via equity.price.historical.
+    run("equity.price.historical (VTI etf)",
+        lambda: obb.equity.price.historical("VTI", interval="1d",
+                start_date="2024-02-12", end_date="2024-02-16", **P))
     run("crypto.price.historical",
         lambda: obb.crypto.price.historical("BTC-USD", interval="1d",
                 start_date="2024-02-12", end_date="2024-02-16", **P))
