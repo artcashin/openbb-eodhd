@@ -15,6 +15,18 @@ from openbb_eodhd.models.fundamental import (
     EODHDIncomeStatementFetcher,
 )
 
+__all__ = [
+    "EODHDEquityHistoricalFetcher",
+    "EODHDCryptoHistoricalFetcher",
+    "EODHDCurrencyHistoricalFetcher",
+    "EODHDIncomeStatementFetcher",
+    "EODHDBalanceSheetFetcher",
+    "EODHDCashFlowStatementFetcher",
+    "EODHDHistoricalDividendsFetcher",
+    "EODHDHistoricalSplitsFetcher",
+    "eodhd_provider",
+]
+
 eodhd_provider = Provider(
     name="eodhd",
     website="https://eodhd.com",

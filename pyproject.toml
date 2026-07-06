@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openbb-eodhd"
 version = "0.1.0"
-description = "EODHD provider extension for OpenBB (equity historical pricing)"
+description = "EODHD provider extension for OpenBB (equity/crypto/currency historical, fundamentals, corporate actions)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "AGPL-3.0-only" }
@@ -17,3 +17,22 @@ eodhd = "openbb_eodhd:eodhd_provider"
 
 [tool.setuptools.packages.find]
 include = ["openbb_eodhd*"]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [".git", "__pycache__", "*.egg-info", "build", "dist", "tests/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff.lint]
+ignore = [
+    # Import-outside-toplevel is intentional: lazy imports avoid loading
+    # heavy deps at module-import time.
+    "PLC0415",
+]

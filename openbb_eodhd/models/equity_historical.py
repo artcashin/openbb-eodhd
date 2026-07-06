@@ -1,7 +1,5 @@
 """EODHD Equity Historical Price Model."""
 
-# pylint: disable=unused-argument
-
 from datetime import datetime
 from typing import Any, Literal
 
@@ -32,6 +30,9 @@ class EODHDEquityHistoricalQueryParams(EquityHistoricalQueryParams):
     Source: https://eodhd.com/financial-apis/api-for-historical-data-and-volumes
     """
 
+    # OpenBB core reads this dunder directly (registry_map / package_builder) for
+    # multi-symbol + choices; pydantic's model_config json_schema_extra is a
+    # different mechanism core never inspects, so it must stay this attribute.
     __json_schema_extra__ = {
         "symbol": {"multiple_items_allowed": True},
         "interval": {"choices": INTERVAL_CHOICES},
@@ -62,7 +63,7 @@ class EODHDEquityHistoricalFetcher(
     """Transform the query, extract and transform the data from EODHD endpoints."""
 
     @staticmethod
-    def transform_query(params: dict[str, Any]) -> EODHDEquityHistoricalQueryParams:
+    def transform_query(params: dict[str, Any]) -> EODHDEquityHistoricalQueryParams:  # pylint: disable=unused-argument
         """Transform the query params; default to a 1-year window."""
         # pylint: disable=import-outside-toplevel
         from dateutil.relativedelta import relativedelta
@@ -92,7 +93,7 @@ class EODHDEquityHistoricalFetcher(
         query: EODHDEquityHistoricalQueryParams,
         data: list[dict],
         **kwargs: Any,
-    ) -> list[EODHDEquityHistoricalData]:
+    ) -> list[EODHDEquityHistoricalData]:  # pylint: disable=unused-argument
         """Map EODHD bar fields to the standard model."""
         rows = rows_from_bars(query.interval, "," in query.symbol, data)
         return [EODHDEquityHistoricalData.model_validate(r) for r in rows]

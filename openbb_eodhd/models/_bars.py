@@ -9,6 +9,7 @@ logic once; each asset-class fetcher supplies its own symbol qualification.
 from datetime import datetime, time, timezone
 from typing import Any
 
+from openbb_core.app.model.abstract.error import OpenBBError
 from openbb_core.provider.utils.errors import EmptyDataError, UnauthorizedError
 
 # OpenBB interval -> EODHD. Intraday -> /api/intraday; daily+ -> /api/eod.
@@ -66,10 +67,14 @@ async def fetch_bars(
             response = await amake_request(
                 url, method="GET", params=params, timeout=30
             )
-        except Exception as exc:  # noqa: BLE001  (EODHD 401/403 return HTML)
-            raise UnauthorizedError(
-                f"EODHD request for '{sym}' failed: {exc}. Check EODHD_API_KEY and"
-                " that the token has access to this symbol/exchange."
+        except Exception as exc:
+            # The request itself failed (timeout, connection, non-JSON body).
+            # Don't assume it's auth — but a 401/403 also lands here (EODHD
+            # returns HTML), so keep the API-key hint.
+            raise OpenBBError(
+                f"EODHD request for '{sym}' failed: {exc}. If this is a 401/403,"
+                " verify EODHD_API_KEY is valid and the token has access to this"
+                " symbol/exchange."
             ) from exc
         if isinstance(response, dict):
             msg = response.get("errors") or response.get("message") or response
@@ -87,7 +92,7 @@ async def fetch_bars(
 def rows_from_bars(interval: str, multiple: bool, data: list[dict]) -> list[dict]:
     """Turn raw EODHD bars into standard-model row dicts."""
     # pylint: disable=import-outside-toplevel
-    from pandas import to_datetime
+    from pandas import isna, to_datetime
 
     intraday = interval in INTRADAY_MAP
     rows: list[dict] = []
@@ -97,9 +102,14 @@ def rows_from_bars(interval: str, multiple: bool, data: list[dict]) -> list[dict
             continue
         if intraday:
             # `timestamp` is a UTC unix epoch; keep bars tz-aware in UTC.
-            bar_date: Any = to_datetime(bar["timestamp"], unit="s", utc=True)
+            bar_date: Any = to_datetime(bar.get("timestamp"), unit="s", utc=True, errors="coerce")
         else:
-            bar_date = to_datetime(bar["date"]).date()
+            bar_date = to_datetime(bar.get("date"), errors="coerce")
+        # Skip bars whose date is missing/unparseable — never emit a NaT row.
+        if isna(bar_date):
+            continue
+        if not intraday:
+            bar_date = bar_date.date()
         row = {
             "date": bar_date,
             "open": bar.get("open"),
@@ -112,6 +122,7 @@ def rows_from_bars(interval: str, multiple: bool, data: list[dict]) -> list[dict
         if multiple:
             row["symbol"] = bar.get("_symbol")
         rows.append(row)
-    # Chronological, then by symbol when multiple.
+    # Chronological, then by symbol when multiple. Every row has a real date
+    # (NaT rows were skipped above), so the sort key is safe.
     rows.sort(key=lambda r: (str(r.get("symbol", "")), r["date"]))
     return rows

@@ -1,7 +1,5 @@
 """EODHD corporate actions: historical dividends and splits."""
 
-# pylint: disable=unused-argument
-
 from typing import Any
 
 from openbb_core.provider.abstract.fetcher import Fetcher
@@ -13,6 +11,7 @@ from openbb_core.provider.standard_models.historical_splits import (
     HistoricalSplitsData,
     HistoricalSplitsQueryParams,
 )
+from openbb_core.app.model.abstract.error import OpenBBError
 from openbb_core.provider.utils.errors import EmptyDataError, UnauthorizedError
 from pydantic import Field
 
@@ -41,9 +40,12 @@ async def _fetch_list(
         response = await amake_request(
             f"{BASE_URL}/{kind}/{sym}", method="GET", params=params, timeout=30
         )
-    except Exception as exc:  # noqa: BLE001  (EODHD 401/403 return HTML)
-        raise UnauthorizedError(
-            f"EODHD {kind} for '{sym}' failed: {exc}. Check EODHD_API_KEY and access."
+    except Exception as exc:
+        # The request itself failed; a 401/403 also lands here (HTML body), so
+        # keep the API-key hint without asserting the failure is auth-related.
+        raise OpenBBError(
+            f"EODHD {kind} for '{sym}' failed: {exc}. If this is a 401/403, verify"
+            " EODHD_API_KEY is valid and the token has access to this symbol."
         ) from exc
     if isinstance(response, dict):
         msg = response.get("errors") or response.get("message") or response
@@ -82,10 +84,11 @@ class EODHDHistoricalDividendsFetcher(
 
     @staticmethod
     def transform_query(params: dict[str, Any]) -> EODHDHistoricalDividendsQueryParams:
+        # pylint: disable=unused-argument
         return EODHDHistoricalDividendsQueryParams(**params)
 
     @staticmethod
-    async def aextract_data(query, credentials, **kwargs) -> list[dict]:
+    async def aextract_data(query, credentials, **kwargs) -> list[dict]:  # pylint: disable=unused-argument
         extra: dict[str, Any] = {}
         if query.start_date:
             extra["from"] = str(query.start_date)
@@ -95,19 +98,27 @@ class EODHDHistoricalDividendsFetcher(
         return await _fetch_list("div", sym, credentials, extra)
 
     @staticmethod
-    def transform_data(query, data: list[dict], **kwargs) -> list[EODHDHistoricalDividendsData]:
+    def transform_data(query, data: list[dict], **kwargs) -> list[EODHDHistoricalDividendsData]:  # pylint: disable=unused-argument
         # pylint: disable=import-outside-toplevel
-        from pandas import to_datetime
+        from pandas import isna, to_datetime
 
         def _d(v):
-            return to_datetime(v).date() if v else None
+            if not v:
+                return None
+            ts = to_datetime(v, errors="coerce")
+            return None if isna(ts) else ts.date()
 
         rows = []
         for item in data:
+            ex_date = _d(item.get("date"))
+            # ex_dividend_date is the primary field and the sort key; skip rows
+            # that lack a usable one rather than carry a null/NaT date.
+            if ex_date is None:
+                continue
             rows.append(
                 EODHDHistoricalDividendsData.model_validate(
                     {
-                        "ex_dividend_date": _d(item.get("date")),
+                        "ex_dividend_date": ex_date,
                         "amount": item.get("value"),
                         "declaration_date": _d(item.get("declarationDate")),
                         "record_date": _d(item.get("recordDate")),
@@ -142,15 +153,16 @@ class EODHDHistoricalSplitsFetcher(
 
     @staticmethod
     def transform_query(params: dict[str, Any]) -> EODHDHistoricalSplitsQueryParams:
+        # pylint: disable=unused-argument
         return EODHDHistoricalSplitsQueryParams(**params)
 
     @staticmethod
-    async def aextract_data(query, credentials, **kwargs) -> list[dict]:
+    async def aextract_data(query, credentials, **kwargs) -> list[dict]:  # pylint: disable=unused-argument
         sym = _qualify(query.symbol, query.exchange)
         return await _fetch_list("splits", sym, credentials)
 
     @staticmethod
-    def transform_data(query, data: list[dict], **kwargs) -> list[EODHDHistoricalSplitsData]:
+    def transform_data(query, data: list[dict], **kwargs) -> list[EODHDHistoricalSplitsData]:  # pylint: disable=unused-argument
         # pylint: disable=import-outside-toplevel
         from pandas import to_datetime
 
@@ -163,10 +175,17 @@ class EODHDHistoricalSplitsFetcher(
                 den = float(raw[1]) if len(raw) > 1 and float(raw[1]) else 1.0
             except (ValueError, IndexError):
                 continue
+            raw_date = item.get("date")
+            if not raw_date:
+                continue
+            try:
+                parsed = to_datetime(raw_date).date()
+            except (ValueError, TypeError):
+                continue
             rows.append(
                 EODHDHistoricalSplitsData.model_validate(
                     {
-                        "date": to_datetime(item["date"]).date(),
+                        "date": parsed,
                         "numerator": num,
                         "denominator": den,
                         # standard field is a string, e.g. "4:1".

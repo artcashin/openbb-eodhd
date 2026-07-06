@@ -6,8 +6,6 @@ line items are mapped to OpenBB's conventional field names; every other EODHD
 field is passed through snake_cased (the standard models allow extra fields).
 """
 
-# pylint: disable=unused-argument
-
 import re
 from typing import Any, Literal
 
@@ -24,6 +22,7 @@ from openbb_core.provider.standard_models.income_statement import (
     IncomeStatementData,
     IncomeStatementQueryParams,
 )
+from openbb_core.app.model.abstract.error import OpenBBError
 from openbb_core.provider.utils.errors import EmptyDataError, UnauthorizedError
 from pydantic import Field
 
@@ -98,7 +97,7 @@ def _snake(name: str) -> str:
 
 def _num(value: Any) -> Any:
     """Coerce EODHD's (often string) numerics to float, or None."""
-    if value in (None, "", "None"):
+    if value in (None, ""):
         return None
     try:
         return float(value)
@@ -130,10 +129,13 @@ async def _fetch_section(
     }
     try:
         response = await amake_request(url, method="GET", params=params, timeout=30)
-    except Exception as exc:  # noqa: BLE001  (EODHD 401/403 return HTML, not JSON)
-        raise UnauthorizedError(
-            f"EODHD fundamentals for '{sym}' failed: {exc}. Check EODHD_API_KEY and"
-            " that the token/plan has fundamentals access for this symbol."
+    except Exception as exc:
+        # The request itself failed; a 401/403 also lands here (HTML body), so
+        # keep the API-key hint without asserting the failure is auth-related.
+        raise OpenBBError(
+            f"EODHD fundamentals for '{sym}' failed: {exc}. If this is a 401/403,"
+            " verify EODHD_API_KEY is valid and the token/plan has fundamentals"
+            " access for this symbol."
         ) from exc
     if not isinstance(response, dict) or not response:
         raise EmptyDataError(f"EODHD returned no fundamentals for '{sym}'.")
@@ -143,7 +145,7 @@ async def _fetch_section(
 def _transform(section_data: dict, period: str, limit: int | None, field_map: dict) -> list[dict]:
     """Turn one EODHD statement section into standard-model row dicts."""
     # pylint: disable=import-outside-toplevel
-    from pandas import to_datetime
+    from pandas import isna, to_datetime
 
     bucket = section_data.get("yearly" if period == "annual" else "quarterly") or {}
     # EODHD keys the entries by period-ending date; newest first.
@@ -153,7 +155,11 @@ def _transform(section_data: dict, period: str, limit: int | None, field_map: di
 
     rows: list[dict] = []
     for entry in entries:
-        end = to_datetime(entry["date"]).date()
+        end_ts = to_datetime(entry.get("date"), errors="coerce")
+        # Skip entries whose period-ending date is missing/unparseable.
+        if isna(end_ts):
+            continue
+        end = end_ts.date()
         quarter = (end.month - 1) // 3 + 1
         row: dict[str, Any] = {
             "period_ending": end,
@@ -180,6 +186,7 @@ async def _extract(section: str, field_map: dict, query, credentials) -> list[di
 class EODHDIncomeStatementQueryParams(IncomeStatementQueryParams):
     """EODHD Income Statement Query."""
 
+    # Core reads this dunder directly for choices; keep it (not model_config).
     __json_schema_extra__ = {"period": {"choices": ["annual", "quarter"]}}
     period: Literal["annual", "quarter"] = Field(default="annual", description="Reporting period.")
     exchange: str = Field(default="US", description="EODHD exchange code for bare symbols (e.g. 'US').")
@@ -188,6 +195,7 @@ class EODHDIncomeStatementQueryParams(IncomeStatementQueryParams):
 class EODHDBalanceSheetQueryParams(BalanceSheetQueryParams):
     """EODHD Balance Sheet Query."""
 
+    # Core reads this dunder directly for choices; keep it (not model_config).
     __json_schema_extra__ = {"period": {"choices": ["annual", "quarter"]}}
     period: Literal["annual", "quarter"] = Field(default="annual", description="Reporting period.")
     exchange: str = Field(default="US", description="EODHD exchange code for bare symbols (e.g. 'US').")
@@ -196,6 +204,7 @@ class EODHDBalanceSheetQueryParams(BalanceSheetQueryParams):
 class EODHDCashFlowStatementQueryParams(CashFlowStatementQueryParams):
     """EODHD Cash Flow Statement Query."""
 
+    # Core reads this dunder directly for choices; keep it (not model_config).
     __json_schema_extra__ = {"period": {"choices": ["annual", "quarter"]}}
     period: Literal["annual", "quarter"] = Field(default="annual", description="Reporting period.")
     exchange: str = Field(default="US", description="EODHD exchange code for bare symbols (e.g. 'US').")
@@ -208,15 +217,15 @@ class EODHDIncomeStatementFetcher(
     """EODHD income statement."""
 
     @staticmethod
-    def transform_query(params: dict[str, Any]) -> EODHDIncomeStatementQueryParams:
+    def transform_query(params: dict[str, Any]) -> EODHDIncomeStatementQueryParams:  # pylint: disable=unused-argument
         return EODHDIncomeStatementQueryParams(**params)
 
     @staticmethod
-    async def aextract_data(query, credentials, **kwargs) -> list[dict]:
+    async def aextract_data(query, credentials, **kwargs) -> list[dict]:  # pylint: disable=unused-argument
         return await _extract("Income_Statement", INCOME_MAP, query, credentials)
 
     @staticmethod
-    def transform_data(query, data: list[dict], **kwargs) -> list[IncomeStatementData]:
+    def transform_data(query, data: list[dict], **kwargs) -> list[IncomeStatementData]:  # pylint: disable=unused-argument
         return [IncomeStatementData.model_validate(r) for r in data]
 
 
@@ -226,15 +235,15 @@ class EODHDBalanceSheetFetcher(
     """EODHD balance sheet."""
 
     @staticmethod
-    def transform_query(params: dict[str, Any]) -> EODHDBalanceSheetQueryParams:
+    def transform_query(params: dict[str, Any]) -> EODHDBalanceSheetQueryParams:  # pylint: disable=unused-argument
         return EODHDBalanceSheetQueryParams(**params)
 
     @staticmethod
-    async def aextract_data(query, credentials, **kwargs) -> list[dict]:
+    async def aextract_data(query, credentials, **kwargs) -> list[dict]:  # pylint: disable=unused-argument
         return await _extract("Balance_Sheet", BALANCE_MAP, query, credentials)
 
     @staticmethod
-    def transform_data(query, data: list[dict], **kwargs) -> list[BalanceSheetData]:
+    def transform_data(query, data: list[dict], **kwargs) -> list[BalanceSheetData]:  # pylint: disable=unused-argument
         return [BalanceSheetData.model_validate(r) for r in data]
 
 
@@ -244,13 +253,13 @@ class EODHDCashFlowStatementFetcher(
     """EODHD cash-flow statement."""
 
     @staticmethod
-    def transform_query(params: dict[str, Any]) -> EODHDCashFlowStatementQueryParams:
+    def transform_query(params: dict[str, Any]) -> EODHDCashFlowStatementQueryParams:  # pylint: disable=unused-argument
         return EODHDCashFlowStatementQueryParams(**params)
 
     @staticmethod
-    async def aextract_data(query, credentials, **kwargs) -> list[dict]:
+    async def aextract_data(query, credentials, **kwargs) -> list[dict]:  # pylint: disable=unused-argument
         return await _extract("Cash_Flow", CASHFLOW_MAP, query, credentials)
 
     @staticmethod
-    def transform_data(query, data: list[dict], **kwargs) -> list[CashFlowStatementData]:
+    def transform_data(query, data: list[dict], **kwargs) -> list[CashFlowStatementData]:  # pylint: disable=unused-argument
         return [CashFlowStatementData.model_validate(r) for r in data]

@@ -1,7 +1,5 @@
 """EODHD Currency (Forex) Historical Price Model."""
 
-# pylint: disable=unused-argument
-
 from datetime import datetime
 from typing import Any, Literal
 
@@ -30,6 +28,9 @@ def _qualify_forex(symbol: str) -> list[str]:
 class EODHDCurrencyHistoricalQueryParams(CurrencyHistoricalQueryParams):
     """EODHD Currency Historical Price Query."""
 
+    # OpenBB core reads this dunder directly (registry_map / package_builder) for
+    # multi-symbol + choices; pydantic's model_config json_schema_extra is a
+    # different mechanism core never inspects, so it must stay this attribute.
     __json_schema_extra__ = {
         "symbol": {"multiple_items_allowed": True},
         "interval": {"choices": INTERVAL_CHOICES},
@@ -54,7 +55,7 @@ class EODHDCurrencyHistoricalFetcher(
     """Extract and transform FX bars from EODHD (.FOREX symbols)."""
 
     @staticmethod
-    def transform_query(params: dict[str, Any]) -> EODHDCurrencyHistoricalQueryParams:
+    def transform_query(params: dict[str, Any]) -> EODHDCurrencyHistoricalQueryParams:  # pylint: disable=unused-argument
         # pylint: disable=import-outside-toplevel
         from dateutil.relativedelta import relativedelta
 
@@ -67,13 +68,13 @@ class EODHDCurrencyHistoricalFetcher(
         return EODHDCurrencyHistoricalQueryParams(**transformed)
 
     @staticmethod
-    async def aextract_data(query, credentials, **kwargs) -> list[dict]:
+    async def aextract_data(query, credentials, **kwargs) -> list[dict]:  # pylint: disable=unused-argument
         return await fetch_bars(
             query.interval, _qualify_forex(query.symbol),
             query.start_date, query.end_date, credentials,
         )
 
     @staticmethod
-    def transform_data(query, data: list[dict], **kwargs) -> list[EODHDCurrencyHistoricalData]:
+    def transform_data(query, data: list[dict], **kwargs) -> list[EODHDCurrencyHistoricalData]:  # pylint: disable=unused-argument
         rows = rows_from_bars(query.interval, "," in query.symbol, data)
         return [EODHDCurrencyHistoricalData.model_validate(r) for r in rows]
