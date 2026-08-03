@@ -9,7 +9,6 @@ from openbb_eodhd.models._bars import (
     INTRADAY_MAP,
     EOD_PERIOD_MAP,
     INTERVAL_CHOICES,
-    BASE_URL,
     to_unix,
     fetch_bars,
     rows_from_bars,
@@ -30,9 +29,6 @@ class TestConstants:
 
     def test_interval_choices(self):
         assert INTERVAL_CHOICES == ["1m", "5m", "1h", "1d", "1W", "1M"]
-
-    def test_base_url(self):
-        assert BASE_URL == "https://eodhd.com/api"
 
 
 # ============================================================
@@ -147,10 +143,10 @@ class TestRowsFromBars:
 
 
 # ============================================================
-# fetch_bars (async — mocked amake_request)
+# fetch_bars (async — mocked official-SDK client)
 # ============================================================
 
-PATCH_TARGET = "openbb_core.provider.utils.helpers.amake_request"
+PATCH_TARGET = "openbb_eodhd.models._bars.get_client"
 
 
 class TestFetchBars:
@@ -162,116 +158,128 @@ class TestFetchBars:
         with pytest.raises(Exception, match="Missing EODHD credential"):
             run_async(fetch_bars, "1d", ["AAPL.US"], date(2024, 1, 1), date(2024, 1, 5), {})
 
-    def test_single_symbol_eod(self, eodhd_credentials, eod_bar_data):
-        async def mock_request(url, method="GET", **kwargs):
-            assert "eod" in url and "AAPL.US" in url
-            return eod_bar_data
-
-        with patch(PATCH_TARGET, mock_request):
+    def test_single_symbol_eod(self, eodhd_credentials, eod_bar_data, mock_eodhd_client):
+        client = mock_eodhd_client(eod_bar_data)
+        with patch(PATCH_TARGET, return_value=client):
             results = run_async(
                 fetch_bars, "1d", ["AAPL.US"],
                 date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
             )
         assert len(results) == 2
         assert "_symbol" not in results[0]
+        client.get_eod_historical_stock_market_data.assert_called_once()
+        assert client.get_eod_historical_stock_market_data.call_args.kwargs["symbol"] == "AAPL.US"
+        client.get_intraday_historical_data.assert_not_called()
 
-    def test_multi_symbol_eod(self, eodhd_credentials, eod_bar_data):
-        calls = []
-
-        async def mock_request(url, method="GET", **kwargs):
-            calls.append(url)
-            return eod_bar_data
-
-        with patch(PATCH_TARGET, mock_request):
+    def test_multi_symbol_eod(self, eodhd_credentials, eod_bar_data, mock_eodhd_client):
+        client = mock_eodhd_client(lambda *a, **k: [dict(b) for b in eod_bar_data])
+        with patch(PATCH_TARGET, return_value=client):
             results = run_async(
                 fetch_bars, "1d", ["AAPL.US", "MSFT.US"],
                 date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
             )
         assert len(results) == 4  # 2 symbols x 2 bars each
-        assert len(calls) == 2
+        assert client.get_eod_historical_stock_market_data.call_count == 2
 
-    def test_multi_symbol_sets_underscore_symbol(self, eodhd_credentials, eod_bar_data):
-        call_count = 0
-
-        async def mock_request(url, method="GET", **kwargs):
-            nonlocal call_count
-            call_count += 1
-            # Return a fresh copy so _symbol mutations don't alias
-            return [dict(b) for b in eod_bar_data]
-
-        with patch(PATCH_TARGET, mock_request):
+    def test_multi_symbol_sets_underscore_symbol(
+        self, eodhd_credentials, eod_bar_data, mock_eodhd_client
+    ):
+        # Return fresh copies so _symbol mutations don't alias
+        client = mock_eodhd_client(lambda *a, **k: [dict(b) for b in eod_bar_data])
+        with patch(PATCH_TARGET, return_value=client):
             results = run_async(
                 fetch_bars, "1d", ["AAPL.US", "MSFT.US"],
                 date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
             )
-        assert call_count == 2
+        assert client.get_eod_historical_stock_market_data.call_count == 2
         symbols = [r["_symbol"] for r in results]
         assert symbols[0] == "AAPL.US"
         assert symbols[1] == "AAPL.US"
         assert symbols[2] == "MSFT.US"
         assert symbols[3] == "MSFT.US"
 
-    def test_empty_response_raises(self, eodhd_credentials):
-        async def mock_request(url, method="GET", **kwargs):
-            return []
-
-        with patch(PATCH_TARGET, mock_request):
+    def test_empty_response_raises(self, eodhd_credentials, mock_eodhd_client):
+        client = mock_eodhd_client([])
+        with patch(PATCH_TARGET, return_value=client):
             with pytest.raises(Exception, match="The request was returned empty"):
                 run_async(
                     fetch_bars, "1d", ["AAPL.US"],
                     date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
                 )
 
-    def test_error_dict_response_raises(self, eodhd_credentials):
-        async def mock_request(url, method="GET", **kwargs):
-            return {"errors": "Invalid API token"}
-
-        with patch(PATCH_TARGET, mock_request):
+    def test_error_dict_response_raises(self, eodhd_credentials, mock_eodhd_client):
+        client = mock_eodhd_client({"errors": "Invalid API token"})
+        with patch(PATCH_TARGET, return_value=client):
             with pytest.raises(Exception, match="Invalid API token"):
                 run_async(
                     fetch_bars, "1d", ["AAPL.US"],
                     date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
                 )
 
-    def test_intraday_uses_timestamps(self, eodhd_credentials, intraday_bar_data):
-        async def mock_request(url, method="GET", **kwargs):
-            assert "intraday" in url
-            return intraday_bar_data
+    def test_sdk_http_error_maps_to_unauthorized(self, eodhd_credentials, mock_eodhd_client):
+        class FakeHTTPError(Exception):
+            status_code = 401
 
-        with patch(PATCH_TARGET, mock_request):
-            results = run_async(
-                fetch_bars, "1m", ["AAPL.US"],
-                date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
-            )
-        assert len(results) == 2
+        def boom(*a, **k):
+            raise FakeHTTPError("unauthorized")
 
-    def test_eod_url_params(self, eodhd_credentials):
-        async def mock_request(url, method="GET", **kwargs):
-            params = kwargs.get("params", {})
-            assert params["period"] == "d"
-            assert params["order"] == "a"
-            return []
-
-        with patch(PATCH_TARGET, mock_request):
-            with pytest.raises(Exception):
+        client = mock_eodhd_client(boom)
+        with patch(PATCH_TARGET, return_value=client):
+            with pytest.raises(Exception, match="HTTP 401"):
                 run_async(
                     fetch_bars, "1d", ["AAPL.US"],
                     date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
                 )
 
-    def test_intraday_url_params(self, eodhd_credentials):
-        async def mock_request(url, method="GET", **kwargs):
-            params = kwargs.get("params", {})
-            assert params["interval"] == "1m"
-            assert "from" in params
-            assert "to" in params
-            assert isinstance(params["from"], int)
-            assert isinstance(params["to"], int)
-            return []
+    def test_sdk_other_error_maps_to_openbb_error(self, eodhd_credentials, mock_eodhd_client):
+        def boom(*a, **k):
+            raise RuntimeError("connection reset")
 
-        with patch(PATCH_TARGET, mock_request):
-            with pytest.raises(Exception):
+        client = mock_eodhd_client(boom)
+        with patch(PATCH_TARGET, return_value=client):
+            with pytest.raises(Exception, match="connection reset"):
                 run_async(
-                    fetch_bars, "1m", ["AAPL.US"],
+                    fetch_bars, "1d", ["AAPL.US"],
                     date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
                 )
+
+    def test_intraday_uses_timestamps(
+        self, eodhd_credentials, intraday_bar_data, mock_eodhd_client
+    ):
+        client = mock_eodhd_client(intraday_bar_data)
+        with patch(PATCH_TARGET, return_value=client):
+            results = run_async(
+                fetch_bars, "1m", ["AAPL.US"],
+                date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
+            )
+        assert len(results) == 2
+        client.get_intraday_historical_data.assert_called_once()
+        client.get_eod_historical_stock_market_data.assert_not_called()
+
+    def test_eod_call_params(self, eodhd_credentials, eod_bar_data, mock_eodhd_client):
+        client = mock_eodhd_client(eod_bar_data)
+        with patch(PATCH_TARGET, return_value=client):
+            run_async(
+                fetch_bars, "1d", ["AAPL.US"],
+                date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
+            )
+        kwargs = client.get_eod_historical_stock_market_data.call_args.kwargs
+        assert kwargs["period"] == "d"
+        assert kwargs["order"] == "a"
+        assert kwargs["from_date"] == "2024-01-01"
+        assert kwargs["to_date"] == "2024-01-05"
+
+    def test_intraday_call_params(
+        self, eodhd_credentials, intraday_bar_data, mock_eodhd_client
+    ):
+        client = mock_eodhd_client(intraday_bar_data)
+        with patch(PATCH_TARGET, return_value=client):
+            run_async(
+                fetch_bars, "1m", ["AAPL.US"],
+                date(2024, 1, 1), date(2024, 1, 5), eodhd_credentials,
+            )
+        kwargs = client.get_intraday_historical_data.call_args.kwargs
+        assert kwargs["interval"] == "1m"
+        assert isinstance(kwargs["from_unix_time"], int)
+        assert isinstance(kwargs["to_unix_time"], int)
+        assert kwargs["from_unix_time"] < kwargs["to_unix_time"]

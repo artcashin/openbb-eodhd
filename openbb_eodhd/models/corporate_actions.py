@@ -15,7 +15,7 @@ from openbb_core.app.model.abstract.error import OpenBBError
 from openbb_core.provider.utils.errors import EmptyDataError, UnauthorizedError
 from pydantic import Field
 
-BASE_URL = "https://eodhd.com/api"
+from openbb_eodhd.models._client import get_client, raise_sdk_error
 
 
 def _qualify(symbol: str, exchange: str) -> str:
@@ -27,27 +27,35 @@ def _qualify(symbol: str, exchange: str) -> str:
 async def _fetch_list(
     kind: str, sym: str, credentials: dict[str, str] | None, extra: dict | None = None
 ) -> list[dict]:
-    """GET /api/{div|splits}/{sym} and return the raw JSON list."""
+    """Fetch dividends ('div') or splits via the official SDK; return the raw list."""
+    # The official SDK is synchronous (requests); run it off the event loop.
     # pylint: disable=import-outside-toplevel
-    from openbb_core.provider.utils.helpers import amake_request
+    from asyncio import to_thread
 
-    api_key = (credentials or {}).get("eodhd_api_key")
-    if not api_key:
-        raise UnauthorizedError("Missing EODHD credential. Set EODHD_API_KEY.")
+    return await to_thread(_fetch_list_sync, kind, sym, credentials, extra)
 
-    params = {"api_token": api_key, "fmt": "json", **(extra or {})}
+
+def _fetch_list_sync(
+    kind: str, sym: str, credentials: dict[str, str] | None, extra: dict | None
+) -> list[dict]:
+    client = get_client(credentials)
+    extra = extra or {}
     try:
-        response = await amake_request(
-            f"{BASE_URL}/{kind}/{sym}", method="GET", params=params, timeout=30
-        )
+        with client:
+            if kind == "div":
+                response = client.get_historical_dividends_data(
+                    ticker=sym,
+                    date_from=extra.get("from"),
+                    date_to=extra.get("to"),
+                )
+            else:
+                response = client.get_historical_splits_data(ticker=sym)
+    except (OpenBBError, UnauthorizedError):
+        raise
     except Exception as exc:
-        # The request itself failed; a 401/403 also lands here (HTML body), so
-        # keep the API-key hint without asserting the failure is auth-related.
-        raise OpenBBError(
-            f"EODHD {kind} for '{sym}' failed: {exc}. If this is a 401/403, verify"
-            " EODHD_API_KEY is valid and the token has access to this symbol."
-        ) from exc
+        raise_sdk_error(exc, f"{kind} for '{sym}'")
     if isinstance(response, dict):
+        # A 200 response that isn't a list is an error payload.
         msg = response.get("errors") or response.get("message") or response
         raise UnauthorizedError(f"EODHD ({sym}): {msg}")
     if not response:

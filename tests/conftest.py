@@ -77,16 +77,29 @@ def eodhd_credentials() -> dict[str, str]:
 
 
 # ============================================================
-# Mock amake_request
+# Mock official-SDK client (eodhd.APIClient)
 # ============================================================
 
 @pytest.fixture
-def mock_amake_request():
-    """Return a factory that creates mock async amake_request functions."""
+def mock_eodhd_client():
+    """Return a factory that creates a MagicMock official-SDK client.
 
-    def _make(response: Any):
-        async def mock_request(url, method="GET", **kwargs):
-            return response
-        return mock_request
+    Every SDK method returns `response` (or, when `response` is callable, its
+    per-call result). Patch `get_client` at the module under test, e.g.
+    `patch("openbb_eodhd.models._bars.get_client", return_value=client)`.
+    """
+
+    def _make(response: Any) -> MagicMock:
+        client = MagicMock()
+        side_effect = response if callable(response) else lambda *a, **k: response
+        for method in (
+            "get_eod_historical_stock_market_data",
+            "get_intraday_historical_data",
+            "get_historical_dividends_data",
+            "get_historical_splits_data",
+            "get_fundamentals_data",
+        ):
+            getattr(client, method).side_effect = side_effect
+        return client
 
     return _make

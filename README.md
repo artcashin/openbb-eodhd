@@ -4,6 +4,12 @@ An [EODHD](https://eodhd.com) (EOD Historical Data) provider extension for the
 [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB). Adds `provider="eodhd"`
 for historical equity/ETF pricing.
 
+All API calls go through the official
+[EODHD Python library](https://github.com/EodHistoricalData/EODHD-APIs-Python-Financial-Library)
+(`eodhd.APIClient`), pinned to a GitHub commit — the PyPI release (1.0.32)
+predates the SDK's typed errors, request timeouts, and the fundamentals
+`filter` parameter.
+
 ## Coverage
 
 | OpenBB command | EODHD endpoint | Notes |

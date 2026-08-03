@@ -26,7 +26,7 @@ from openbb_core.app.model.abstract.error import OpenBBError
 from openbb_core.provider.utils.errors import EmptyDataError, UnauthorizedError
 from pydantic import Field
 
-BASE_URL = "https://eodhd.com/api"
+from openbb_eodhd.models._client import get_client, raise_sdk_error
 
 # EODHD field -> OpenBB conventional field name. Unmapped fields pass through
 # snake_cased, so these maps only need the commonly-consumed line items.
@@ -112,31 +112,31 @@ async def _fetch_section(
     credentials: dict[str, str] | None,
 ) -> dict:
     """Fetch one Financials section (yearly+quarterly) for a symbol."""
+    # The official SDK is synchronous (requests); run it off the event loop.
     # pylint: disable=import-outside-toplevel
-    from openbb_core.provider.utils.helpers import amake_request
+    from asyncio import to_thread
 
-    api_key = (credentials or {}).get("eodhd_api_key")
-    if not api_key:
-        raise UnauthorizedError("Missing EODHD credential. Set EODHD_API_KEY.")
+    return await to_thread(_fetch_section_sync, section, symbol, exchange, credentials)
 
+
+def _fetch_section_sync(
+    section: str,
+    symbol: str,
+    exchange: str,
+    credentials: dict[str, str] | None,
+) -> dict:
+    client = get_client(credentials)
     sym = symbol.strip().upper()
     sym = sym if "." in sym else f"{sym}.{exchange.upper()}"
-    url = f"{BASE_URL}/fundamentals/{sym}"
-    params = {
-        "api_token": api_key,
-        "fmt": "json",
-        "filter": f"Financials::{section}",
-    }
     try:
-        response = await amake_request(url, method="GET", params=params, timeout=30)
+        with client:
+            response = client.get_fundamentals_data(
+                sym, filter=f"Financials::{section}"
+            )
+    except (OpenBBError, UnauthorizedError):
+        raise
     except Exception as exc:
-        # The request itself failed; a 401/403 also lands here (HTML body), so
-        # keep the API-key hint without asserting the failure is auth-related.
-        raise OpenBBError(
-            f"EODHD fundamentals for '{sym}' failed: {exc}. If this is a 401/403,"
-            " verify EODHD_API_KEY is valid and the token/plan has fundamentals"
-            " access for this symbol."
-        ) from exc
+        raise_sdk_error(exc, f"fundamentals for '{sym}'")
     if not isinstance(response, dict) or not response:
         raise EmptyDataError(f"EODHD returned no fundamentals for '{sym}'.")
     return response
