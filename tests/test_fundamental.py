@@ -7,6 +7,8 @@ import pytest
 from openbb_eodhd.models.fundamental import (
     _snake,
     _num,
+    _parse_fy_end_month,
+    _fiscal_period,
     _transform,
     INCOME_MAP,
     BALANCE_MAP,
@@ -79,6 +81,77 @@ class TestNum:
 
 
 # ============================================================
+# _parse_fy_end_month
+# ============================================================
+
+class TestParseFyEndMonth:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("January", 1),
+            ("June", 6),
+            ("September", 9),
+            ("December", 12),
+            ("september", 9),  # case-insensitive
+            ("  June  ", 6),  # whitespace tolerant
+        ],
+    )
+    def test_known_names(self, value, expected):
+        assert _parse_fy_end_month(value) == expected
+
+    @pytest.mark.parametrize("value", [None, "", "   ", "Not-a-month", 42, {"a": 1}])
+    def test_falls_back_to_december(self, value):
+        assert _parse_fy_end_month(value) == 12
+
+
+# ============================================================
+# _fiscal_period
+# ============================================================
+
+class TestFiscalPeriod:
+    """Fiscal-year/quarter derivation for non-December year-end filers.
+
+    Uses US SEC convention: the fiscal year is labelled by the calendar year
+    in which it ends. Verified against representative issuers:
+
+    - AAPL: fiscal year ends September (FQ1 = Oct-Dec of prior calendar year)
+    - MSFT: fiscal year ends June (FQ1 = Jul-Sep of prior calendar year)
+    - WMT:  fiscal year ends January (FQ1 = Feb-Apr, labelled next FY)
+    - "DEC": December year-end (default; fiscal == calendar)
+    """
+
+    @pytest.mark.parametrize(
+        "period_end,fy_end_month,expected_fy,expected_q",
+        [
+            # AAPL — September year-end
+            (date(2024, 12, 28), 9, 2025, 1),
+            (date(2025, 3, 29), 9, 2025, 2),
+            (date(2025, 6, 28), 9, 2025, 3),
+            (date(2025, 9, 27), 9, 2025, 4),
+            # MSFT — June year-end
+            (date(2026, 9, 30), 6, 2027, 1),
+            (date(2026, 12, 31), 6, 2027, 2),
+            (date(2027, 3, 31), 6, 2027, 3),
+            (date(2027, 6, 30), 6, 2027, 4),
+            # WMT — January year-end
+            (date(2025, 4, 30), 1, 2026, 1),
+            (date(2025, 7, 31), 1, 2026, 2),
+            (date(2025, 10, 31), 1, 2026, 3),
+            (date(2026, 1, 31), 1, 2026, 4),
+            # December year-end — fiscal == calendar
+            (date(2024, 3, 31), 12, 2024, 1),
+            (date(2024, 6, 30), 12, 2024, 2),
+            (date(2024, 9, 30), 12, 2024, 3),
+            (date(2024, 12, 31), 12, 2024, 4),
+        ],
+    )
+    def test_maps_period_end_to_fiscal_year_and_quarter(
+        self, period_end, fy_end_month, expected_fy, expected_q
+    ):
+        assert _fiscal_period(period_end, fy_end_month) == (expected_fy, expected_q)
+
+
+# ============================================================
 # _transform
 # ============================================================
 
@@ -113,6 +186,50 @@ class TestTransform:
         rows = _transform(section_data, "quarter", None, INCOME_MAP)
         assert len(rows) == 1
         assert rows[0]["fiscal_period"] == "Q1"
+
+    def test_quarterly_fiscal_offset_apple(self):
+        """AAPL FQ1 ends late December of prior calendar year."""
+        section_data = {
+            "quarterly": {
+                "2024-12-28": {"date": "2024-12-28", "totalRevenue": "125000000000"},
+            }
+        }
+        rows = _transform(section_data, "quarter", None, INCOME_MAP, fy_end_month=9)
+        assert rows[0]["fiscal_year"] == 2025
+        assert rows[0]["fiscal_period"] == "Q1"
+
+    def test_quarterly_fiscal_offset_microsoft(self):
+        """MSFT FQ1 ends September of the labelled fiscal year."""
+        section_data = {
+            "quarterly": {
+                "2026-09-30": {"date": "2026-09-30", "totalRevenue": "65000000000"},
+            }
+        }
+        rows = _transform(section_data, "quarter", None, INCOME_MAP, fy_end_month=6)
+        assert rows[0]["fiscal_year"] == 2027
+        assert rows[0]["fiscal_period"] == "Q1"
+
+    def test_annual_fiscal_year_shifts_for_non_dec_end(self):
+        """MSFT annual period ending June 2026 is FY2026, not FY2026-06 mislabelled."""
+        section_data = {
+            "yearly": {
+                "2026-06-30": {"date": "2026-06-30", "totalRevenue": "250000000000"},
+            }
+        }
+        rows = _transform(section_data, "annual", None, INCOME_MAP, fy_end_month=6)
+        assert rows[0]["fiscal_year"] == 2026
+        assert rows[0]["fiscal_period"] == "FY"
+
+    def test_default_fy_end_month_preserves_calendar_behavior(self):
+        """No fy_end_month provided => December => fiscal == calendar."""
+        section_data = {
+            "quarterly": {
+                "2024-09-30": {"date": "2024-09-30", "totalRevenue": "1"},
+            }
+        }
+        rows = _transform(section_data, "quarter", None, INCOME_MAP)
+        assert rows[0]["fiscal_year"] == 2024
+        assert rows[0]["fiscal_period"] == "Q3"
 
     def test_limit(self):
         section_data = {
