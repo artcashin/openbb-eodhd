@@ -7,6 +7,7 @@ field is passed through snake_cased (the standard models allow extra fields).
 """
 
 import re
+from datetime import date as _date
 from typing import Any, Literal
 
 from openbb_core.provider.abstract.fetcher import Fetcher
@@ -89,6 +90,29 @@ CASHFLOW_MAP = {
 _META_KEYS = {"date", "filing_date", "currency_symbol"}
 _CAMEL = re.compile(r"(?<!^)(?=[A-Z])")
 
+# Month-name -> 1..12. EODHD returns FiscalYearEnd as a full month name
+# ("September", "June", ...). Anything unrecognized falls back to December.
+_MONTHS = {
+    m.lower(): i
+    for i, m in enumerate(
+        [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ],
+        start=1,
+    )
+}
+
 
 def _snake(name: str) -> str:
     """camelCase -> snake_case."""
@@ -103,6 +127,30 @@ def _num(value: Any) -> Any:
         return float(value)
     except (TypeError, ValueError):
         return value  # non-numeric passthrough (kept as-is)
+
+
+def _parse_fy_end_month(value: Any) -> int:
+    """Parse EODHD's ``General::FiscalYearEnd`` (e.g. ``"September"``) to 1..12.
+
+    Falls back to 12 (December) when the value is missing or unrecognized so
+    the extension stays functional for symbols without the field.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return 12
+    return _MONTHS.get(value.strip().lower(), 12)
+
+
+def _fiscal_period(end: _date, fy_end_month: int) -> tuple[int, int]:
+    """Return ``(fiscal_year, fiscal_quarter)`` for a period-ending date.
+
+    ``fy_end_month`` is 1..12; the fiscal year is labelled by the calendar year
+    in which it ends (US convention, matches EODHD/SEC filings).
+    """
+    fy_start_month = (fy_end_month % 12) + 1
+    months_since_start = (end.month - fy_start_month) % 12
+    quarter = months_since_start // 3 + 1
+    fiscal_year = end.year if end.month <= fy_end_month else end.year + 1
+    return fiscal_year, quarter
 
 
 async def _fetch_section(
@@ -142,8 +190,55 @@ def _fetch_section_sync(
     return response
 
 
-def _transform(section_data: dict, period: str, limit: int | None, field_map: dict) -> list[dict]:
-    """Turn one EODHD statement section into standard-model row dicts."""
+async def _fetch_fiscal_year_end_month(
+    symbol: str,
+    exchange: str,
+    credentials: dict[str, str] | None,
+) -> int:
+    """Fetch ``General::FiscalYearEnd`` for a symbol.
+
+    Errors during this lookup are non-fatal: the caller falls back to
+    December (12) so a missing/failed lookup only degrades to the previous
+    calendar-quarter behavior rather than breaking the request.
+    """
+    # pylint: disable=import-outside-toplevel
+    from asyncio import to_thread
+
+    return await to_thread(_fetch_fy_end_month_sync, symbol, exchange, credentials)
+
+
+def _fetch_fy_end_month_sync(
+    symbol: str,
+    exchange: str,
+    credentials: dict[str, str] | None,
+) -> int:
+    client = get_client(credentials)
+    sym = symbol.strip().upper()
+    sym = sym if "." in sym else f"{sym}.{exchange.upper()}"
+    try:
+        with client:
+            response = client.get_fundamentals_data(
+                sym, filter="General::FiscalYearEnd"
+            )
+    except Exception:  # non-fatal — fall back to Dec below
+        return 12
+    return _parse_fy_end_month(response)
+
+
+def _transform(
+    section_data: dict,
+    period: str,
+    limit: int | None,
+    field_map: dict,
+    fy_end_month: int = 12,
+) -> list[dict]:
+    """Turn one EODHD statement section into standard-model row dicts.
+
+    ``fy_end_month`` (1..12) shifts the derived ``fiscal_year`` and
+    ``fiscal_period`` labels for non-December year-end filers. Defaults to
+    December to preserve backward-compatible behavior when the caller has no
+    fiscal-year-end information.
+    """
     # pylint: disable=import-outside-toplevel
     from pandas import isna, to_datetime
 
@@ -160,10 +255,10 @@ def _transform(section_data: dict, period: str, limit: int | None, field_map: di
         if isna(end_ts):
             continue
         end = end_ts.date()
-        quarter = (end.month - 1) // 3 + 1
+        fiscal_year, quarter = _fiscal_period(end, fy_end_month)
         row: dict[str, Any] = {
             "period_ending": end,
-            "fiscal_year": end.year,
+            "fiscal_year": fiscal_year,
             "fiscal_period": "FY" if period == "annual" else f"Q{quarter}",
         }
         for key, value in entry.items():
@@ -177,9 +272,16 @@ def _transform(section_data: dict, period: str, limit: int | None, field_map: di
 
 
 async def _extract(section: str, field_map: dict, query, credentials) -> list[dict]:
-    """Shared extract: fetch the section then map to standard rows."""
+    """Shared extract: fetch the section then map to standard rows.
+
+    Also fetches the issuer's fiscal-year-end month so quarter/year labels
+    align with the reporting calendar (e.g. AAPL Sep, MSFT Jun, WMT Jan).
+    """
     data = await _fetch_section(section, query.symbol, query.exchange, credentials)
-    return _transform(data, query.period, query.limit, field_map)
+    fy_end_month = await _fetch_fiscal_year_end_month(
+        query.symbol, query.exchange, credentials
+    )
+    return _transform(data, query.period, query.limit, field_map, fy_end_month)
 
 
 # --- Query params: add period + exchange to each standard statement query ------
